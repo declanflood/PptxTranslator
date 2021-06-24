@@ -7,10 +7,10 @@ from google.cloud import translate_v3 as translate
 import sys
 from progress.bar import Bar
 import glob
+import json
 
-PROJECT_ID = "solar-bolt-244414"
 LOCATION = "us-central1"
-PARENT = f"projects/{PROJECT_ID}/locations/{LOCATION}"
+
 GLOSSARY_ID = "my_first_glossary"
 
 
@@ -36,32 +36,48 @@ def translate_file(filename):
     try:
         prs.save(output_filename)
     except:
-        sys.exit("\n Couldn't save translated file, check if '" + output_filename + "' is already open.")
+        sys.exit("\n Couldn't save translated file, check if '" + output_filename + "' is already open in another application.")
     return
 
 
 # Translate a string
 def translate_text(text):
+    # Note on calling translate_text method:
+    #  1) Passing invalid target language codes will throw unexpected 403 missing a valid API key error.
+    #  2) Translation API sometimes detects 'es' instead 'pt', passing source language improves translation quality.
 
     if isinstance(text, six.binary_type):
         text = text.decode("utf-8")
 
-    # #1 Passing invalid target language codes will throw unexpected 403 missing a valid API key error.
-    # #2 Translation API sometimes detects 'es' instead 'pt', passing source language improves translation quality.
-    response = translate_client.translate_text(
-        request={
-            "parent": PARENT,
-            "contents": [text],
-            "mime_type": "text/plain",  # mime types: text/plain, text/html
-            "source_language_code": source_lang_code,
-            "target_language_code": target_lang_code,
-            "glossary_config": glossary_config,
-        }
-    )
-
     output = ""
-    for translation in response.glossary_translations:
-        output = output + translation.translated_text
+    if glossary_available:
+        response = translate_client.translate_text(
+            request={
+                "parent": PARENT,
+                "contents": [text],
+                "mime_type": "text/plain",  # mime types: text/plain, text/html
+                "source_language_code": source_lang_code,
+                "target_language_code": target_lang_code,
+                "glossary_config": glossary_config,
+            }
+        )
+
+        for translation in response.glossary_translations:
+            output = output + translation.translated_text
+    else:
+        response = translate_client.translate_text(
+            request={
+                "parent": PARENT,
+                "contents": [text],
+                "mime_type": "text/plain",  # mime types: text/plain, text/html
+                "source_language_code": source_lang_code,
+                "target_language_code": target_lang_code,
+            }
+        )
+
+        # Display the translation for each input text provided
+        for translation in response.translations:
+            output = output + translation.translated_text
 
     return output
 
@@ -120,19 +136,6 @@ def translate_shape(shape):
 
     return
 
-
-
-# fetch json key
-my_GCP_key =  glob.glob("My_GCP_Translation_API_Key*.json" )
-if len(my_GCP_key) != 1:
-    sys.exit("There should be one (and only one) json key, exiting....")
-os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = my_GCP_key[0]
-
-# create translation client and apply glossary
-translate_client = translate.TranslationServiceClient()
-glossary = translate_client.glossary_path(PROJECT_ID, LOCATION, GLOSSARY_ID)
-glossary_config = translate.TranslateTextGlossaryConfig(glossary=glossary)
-
 # check arguments passed are valid
 # assume pt to en translation unless overridden by arguments
 source_lang_code = "pt"
@@ -141,7 +144,44 @@ if len(sys.argv) == 4:
     source_lang_code = sys.argv[2].replace("-","")
     target_lang_code = sys.argv[3].replace("-","")
 
-# make a list of pptx files in the current directory to translate
+# fetch json key
+my_GCP_key =  glob.glob("My_GCP_Translation_API_Key*.json" )
+if len(my_GCP_key) != 1:
+    sys.exit("Couldn't find key, file naming convention is 'My_GCP_Translation_API_Key*.json'. Exiting....")
+
+json_file = open(my_GCP_key[0], )
+json_data = json.load(json_file)
+project_ID = json_data['project_id']
+json_file.close()
+
+os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = my_GCP_key[0]
+
+PARENT = f"projects/{project_ID}/locations/{LOCATION}"
+
+# create translation client and apply previously created glossary
+translate_client = translate.TranslationServiceClient()
+glossary = translate_client.glossary_path(project_ID, LOCATION, GLOSSARY_ID)
+glossary_config = translate.TranslateTextGlossaryConfig(glossary=glossary)
+
+# check if glossary includes the source and target languages
+source_lang_code_glossary_available = False
+target_lang_code_glossary_available = False
+for glossary in translate_client.list_glossaries(parent=PARENT):
+    if GLOSSARY_ID in glossary.name:
+        # this is the glossary being used, check if it includes the source and target languages
+        for language_code in glossary.language_codes_set.language_codes:
+            if source_lang_code in language_code:
+                source_lang_code_glossary_available = True
+            if target_lang_code in language_code:
+                target_lang_code_glossary_available = True
+
+glossary_available = source_lang_code_glossary_available and target_lang_code_glossary_available
+if glossary_available:
+    print("Found a glossary for " + source_lang_code + " to " + target_lang_code)
+else:
+    print("No glossary found for " + source_lang_code + " to " + target_lang_code)
+
+# make a list of pptx files to be translated
 files_to_translate = []
 if sys.argv[1] == "-all":
     # user wants to translate all pptx files in current folder
